@@ -16,6 +16,7 @@
 package com.linkedin.pinot.broker.broker.helix;
 
 import com.linkedin.pinot.broker.queryquota.TableQueryQuotaManager;
+import com.linkedin.pinot.broker.requesthandler.TableSchemaCache;
 import com.linkedin.pinot.broker.routing.HelixExternalViewBasedRouting;
 import com.linkedin.pinot.common.Utils;
 import com.linkedin.pinot.common.config.TableConfig;
@@ -55,17 +56,19 @@ public class BrokerResourceOnlineOfflineStateModelFactory extends StateModelFact
   private final HelixAdmin _helixAdmin;
   private final HelixExternalViewBasedRouting _helixExternalViewBasedRouting;
   private final TableQueryQuotaManager _tableQueryQuotaManager;
+  private final TableSchemaCache _tableSchemaCache;
 
   private ZkHelixPropertyStore<ZNRecord> _propertyStore;
 
   public BrokerResourceOnlineOfflineStateModelFactory(HelixManager helixManager,
       ZkHelixPropertyStore<ZNRecord> propertyStore, HelixExternalViewBasedRouting helixExternalViewBasedRouting,
-      TableQueryQuotaManager tableQueryQuotaManager) {
+      TableQueryQuotaManager tableQueryQuotaManager, TableSchemaCache tableSchemaCache) {
     _helixManager = helixManager;
     _propertyStore = propertyStore;
     _helixAdmin = helixManager.getClusterManagmentTool();
     _helixExternalViewBasedRouting = helixExternalViewBasedRouting;
     _tableQueryQuotaManager = tableQueryQuotaManager;
+    _tableSchemaCache = tableSchemaCache;
   }
 
   public static String getStateModelDef() {
@@ -97,6 +100,7 @@ public class BrokerResourceOnlineOfflineStateModelFactory extends StateModelFact
         _tableQueryQuotaManager.initTableQueryQuota(
             tableConfig,
             HelixHelper.getExternalViewForResource(_helixAdmin, _helixManager.getClusterName(), BROKER_RESOURCE_INSTANCE));
+        _tableSchemaCache.refreshTableSchema(tableName);
       } catch (Exception e) {
         LOGGER.error("Caught exception during OFFLINE -> ONLINE transition", e);
         Utils.rethrowException(e);

@@ -19,6 +19,7 @@ import com.google.common.collect.ImmutableList;
 import com.linkedin.pinot.broker.broker.AccessControlFactory;
 import com.linkedin.pinot.broker.broker.BrokerServerBuilder;
 import com.linkedin.pinot.broker.queryquota.TableQueryQuotaManager;
+import com.linkedin.pinot.broker.requesthandler.TableSchemaCache;
 import com.linkedin.pinot.broker.routing.HelixExternalViewBasedRouting;
 import com.linkedin.pinot.common.config.TagNameUtils;
 import com.linkedin.pinot.common.metadata.ZKMetadataProvider;
@@ -68,6 +69,7 @@ public class HelixBrokerStarter {
   private final LiveInstancesChangeListenerImpl _liveInstancesListener;
   private final MetricsRegistry _metricsRegistry;
   private final TableQueryQuotaManager _tableQueryQuotaManager;
+  private final TableSchemaCache _tableSchemaCache;
   private final TimeboundaryRefreshMessageHandlerFactory _tbiMessageHandler;
 
   // Set after broker is started, which is actually in the constructor.
@@ -120,6 +122,11 @@ public class HelixBrokerStarter {
     _helixExternalViewBasedRouting = new HelixExternalViewBasedRouting(_propertyStore, _spectatorHelixManager,
         pinotHelixProperties.subset(ROUTING_TABLE_PARAMS_SUBSET_KEY));
     _tableQueryQuotaManager = new TableQueryQuotaManager(_spectatorHelixManager);
+    _tableSchemaCache = new TableSchemaCache(_propertyStore,
+        _pinotHelixProperties.getInt(CommonConstants.Broker.CONFIG_OF_TABLE_SCHEMA_MAXIMUM_CACHE_SIZE,
+            CommonConstants.Broker.DEFAULT_TABLE_SCHEMA_CACHE_SIZE),
+        _pinotHelixProperties.getInt(CommonConstants.Broker.CONFIG_OF_TABLE_SCHEMA_CACHE_TIMEOUT_IN_MINUTE,
+            CommonConstants.Broker.DEFAULT_TABLE_SCHEMA_CACHE_TIMEOUT_IN_MINUTE));
     _brokerServerBuilder = startBroker(_pinotHelixProperties);
     _metricsRegistry = _brokerServerBuilder.getMetricsRegistry();
     ClusterChangeMediator clusterChangeMediator =
@@ -134,7 +141,7 @@ public class HelixBrokerStarter {
     StateMachineEngine stateMachineEngine = _helixManager.getStateMachineEngine();
     StateModelFactory<?> stateModelFactory =
         new BrokerResourceOnlineOfflineStateModelFactory(_spectatorHelixManager, _propertyStore,
-            _helixExternalViewBasedRouting, _tableQueryQuotaManager);
+            _helixExternalViewBasedRouting, _tableQueryQuotaManager, _tableSchemaCache);
     stateMachineEngine.registerStateModelFactory(BrokerResourceOnlineOfflineStateModelFactory.getStateModelDef(),
         stateModelFactory);
     _helixManager.connect();
@@ -198,7 +205,8 @@ public class HelixBrokerStarter {
       config = DefaultHelixBrokerConfig.getDefaultBrokerConf();
     }
     BrokerServerBuilder brokerServerBuilder = new BrokerServerBuilder(config, _helixExternalViewBasedRouting,
-        _helixExternalViewBasedRouting.getTimeBoundaryService(), _liveInstancesListener, _tableQueryQuotaManager);
+        _helixExternalViewBasedRouting.getTimeBoundaryService(), _liveInstancesListener, _tableQueryQuotaManager,
+        _tableSchemaCache);
     _accessControlFactory = brokerServerBuilder.getAccessControlFactory();
     _helixExternalViewBasedRouting.setBrokerMetrics(brokerServerBuilder.getBrokerMetrics());
     _tableQueryQuotaManager.setBrokerMetrics(brokerServerBuilder.getBrokerMetrics());

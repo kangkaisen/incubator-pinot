@@ -23,24 +23,35 @@ import com.linkedin.pinot.broker.routing.RoutingTable;
 import com.linkedin.pinot.broker.routing.RoutingTableLookupRequest;
 import com.linkedin.pinot.broker.routing.TimeBoundaryService;
 import com.linkedin.pinot.common.config.TableNameBuilder;
+import com.linkedin.pinot.common.data.Schema;
 import com.linkedin.pinot.common.exception.QueryException;
 import com.linkedin.pinot.common.metrics.BrokerMeter;
 import com.linkedin.pinot.common.metrics.BrokerMetrics;
 import com.linkedin.pinot.common.metrics.BrokerQueryPhase;
+import com.linkedin.pinot.common.request.AggregationInfo;
 import com.linkedin.pinot.common.request.BrokerRequest;
 import com.linkedin.pinot.common.request.FilterOperator;
 import com.linkedin.pinot.common.request.FilterQuery;
 import com.linkedin.pinot.common.request.FilterQueryMap;
+import com.linkedin.pinot.common.request.GroupBy;
+import com.linkedin.pinot.common.request.Selection;
+import com.linkedin.pinot.common.request.transform.TransformExpressionTree;
 import com.linkedin.pinot.common.response.BrokerResponse;
 import com.linkedin.pinot.common.response.broker.BrokerResponseNative;
 import com.linkedin.pinot.common.utils.CommonConstants;
+import com.linkedin.pinot.common.utils.request.FilterQueryTree;
+import com.linkedin.pinot.common.utils.request.RequestUtils;
+import com.linkedin.pinot.core.query.aggregation.function.AggregationFunctionType;
+import com.linkedin.pinot.core.query.aggregation.function.AggregationFunctionUtils;
 import com.linkedin.pinot.core.query.reduce.BrokerReduceService;
 import com.linkedin.pinot.pql.parsers.Pql2Compiler;
 import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.annotation.Nullable;
@@ -65,6 +76,7 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
   protected final TimeBoundaryService _timeBoundaryService;
   protected final AccessControlFactory _accessControlFactory;
   protected final TableQueryQuotaManager _tableQueryQuotaManager;
+  protected final TableSchemaCache _tableSchemaCache;
   protected final BrokerMetrics _brokerMetrics;
 
   protected final AtomicLong _requestIdGenerator = new AtomicLong();
@@ -78,12 +90,14 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
 
   public BaseBrokerRequestHandler(Configuration config, RoutingTable routingTable,
       TimeBoundaryService timeBoundaryService, AccessControlFactory accessControlFactory,
-      TableQueryQuotaManager tableQueryQuotaManager, BrokerMetrics brokerMetrics) {
+      TableQueryQuotaManager tableQueryQuotaManager, TableSchemaCache tableSchemaCache,
+      BrokerMetrics brokerMetrics) {
     _config = config;
     _routingTable = routingTable;
     _timeBoundaryService = timeBoundaryService;
     _accessControlFactory = accessControlFactory;
     _tableQueryQuotaManager = tableQueryQuotaManager;
+    _tableSchemaCache = tableSchemaCache;
     _brokerMetrics = brokerMetrics;
 
     _brokerId = config.getString(CONFIG_OF_BROKER_ID, getDefaultBrokerId());
@@ -181,7 +195,7 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
 
     // Validate the request
     try {
-      validateRequest(brokerRequest);
+      validateRequest(brokerRequest, request);
     } catch (Exception e) {
       LOGGER.info("Caught exception while validating request {}: {}, {}", requestId, query, e.getMessage());
       _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.QUERY_VALIDATION_EXCEPTIONS, 1);
@@ -295,7 +309,7 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
    *   <li>Value for 'LIMIT' for selection query <= configured value</li>
    * </ul>
    */
-  private void validateRequest(BrokerRequest brokerRequest) {
+  private void validateRequest(BrokerRequest brokerRequest, JSONObject request) {
     if (brokerRequest.isSetAggregationsInfo()) {
       if (brokerRequest.isSetGroupBy()) {
         long topN = brokerRequest.getGroupBy().getTopN();
@@ -311,6 +325,71 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
             "Value for 'LIMIT' (" + limit + ") exceeds maximum allowed value of " + _queryResponseLimit);
       }
     }
+
+    // Checks whether the query contains non-existent columns.
+    // Table name has already been verified before hitting this line.
+    if (request.has(VALIDATE_QUERY) && request.getBoolean(VALIDATE_QUERY)) {
+      String tableName = brokerRequest.getQuerySource().getTableName();
+      Schema schema = _tableSchemaCache.getIfTableSchemaPresent(tableName);
+      if (schema != null) {
+        Set<String> columnsFromBrokerRequest = getAllColumnsFromBrokerRequest(brokerRequest);
+        // Filters out virtual columns in the query.
+        columnsFromBrokerRequest.removeIf(column -> column.startsWith("$"));
+        columnsFromBrokerRequest.removeAll(schema.getColumnNames());
+        if (!columnsFromBrokerRequest.isEmpty()) {
+          _brokerMetrics.addMeteredTableValue(tableName, BrokerMeter.QUERY_NON_EXISTENT_COLUMNS, 1L);
+          throw new RuntimeException(
+              "Found non-existent columns from the query: " + columnsFromBrokerRequest.toString());
+        }
+      } else {
+        // If the cache doesn't have the schema, loads the schema to the cache asynchronously.
+        _tableSchemaCache.refreshTableSchema(tableName);
+      }
+    }
+  }
+
+  /**
+   * Helper to get all the columns from broker request.
+   * Returns the set of all the columns.
+   */
+  private Set<String> getAllColumnsFromBrokerRequest(BrokerRequest brokerRequest) {
+    Set<String> allColumns = new HashSet<>();
+    // Filter
+    FilterQueryTree filterQueryTree = RequestUtils.generateFilterQueryTree(brokerRequest);
+    if (filterQueryTree != null) {
+      allColumns.addAll(RequestUtils.extractFilterColumns(filterQueryTree));
+    }
+
+    // Aggregation
+    List<AggregationInfo> aggregationsInfo = brokerRequest.getAggregationsInfo();
+    if (aggregationsInfo != null) {
+      Set<TransformExpressionTree> _aggregationExpressions = new HashSet<>();
+      for (AggregationInfo aggregationInfo : aggregationsInfo) {
+        if (!aggregationInfo.getAggregationType().equalsIgnoreCase(AggregationFunctionType.COUNT.getName())) {
+          _aggregationExpressions.add(
+              TransformExpressionTree.compileToExpressionTree(AggregationFunctionUtils.getColumn(aggregationInfo)));
+        }
+      }
+      allColumns.addAll(RequestUtils.extractColumnsFromExpressions(_aggregationExpressions));
+    }
+
+    // Group-by
+    GroupBy groupBy = brokerRequest.getGroupBy();
+    if (groupBy != null) {
+      Set<TransformExpressionTree> groupByExpressions = new HashSet<>();
+      for (String expression : groupBy.getExpressions()) {
+        groupByExpressions.add(TransformExpressionTree.compileToExpressionTree(expression));
+      }
+      allColumns.addAll(RequestUtils.extractColumnsFromExpressions(groupByExpressions));
+    }
+
+    // Selection
+    Selection selection = brokerRequest.getSelections();
+    if (selection != null) {
+      allColumns.addAll(RequestUtils.extractSelectionColumns(selection));
+    }
+
+    return allColumns;
   }
 
   /**
