@@ -28,11 +28,18 @@ import com.linkedin.pinot.common.utils.CommonConstants;
 import com.linkedin.pinot.common.utils.TenantRole;
 import com.linkedin.pinot.common.utils.ZkStarter;
 import com.linkedin.pinot.controller.ControllerConf;
+import com.linkedin.pinot.controller.api.pojos.Instance;
 import com.linkedin.pinot.controller.helix.ControllerRequestBuilderUtil;
 import com.linkedin.pinot.controller.helix.ControllerTest;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Random;
 import java.util.Set;
+import org.apache.helix.AccessOption;
+import org.apache.helix.ZNRecord;
+import org.apache.helix.manager.zk.ZkCacheBaseDataAccessor;
 import org.apache.helix.model.IdealState;
+import org.apache.helix.model.InstanceConfig;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
@@ -75,6 +82,31 @@ public class PinotHelixResourceManagerTest extends ControllerTest {
     BiMap<String, String> endpoints = _helixResourceManager.getDataInstanceAdminEndpoints(servers);
     for (int i = 0; i < NUM_INSTANCES; i++) {
       Assert.assertTrue(endpoints.inverse().containsKey("localhost:" + String.valueOf(BASE_SERVER_ADMIN_PORT + i)));
+    }
+    ZkCacheBaseDataAccessor<ZNRecord> zkCacheBaseDataAccessor = _helixResourceManager.getCacheInstanceConfigsDataAccessor();
+    Assert.assertNotNull(zkCacheBaseDataAccessor);
+    List<ZNRecord> znRecords = zkCacheBaseDataAccessor.getChildren("/", null, AccessOption.PERSISTENT);
+    for (ZNRecord znRecord : znRecords) {
+      if (znRecord.getId().startsWith("Server")) {
+        Assert.assertNotNull(znRecord.getSimpleField(CommonConstants.Helix.Instance.ADMIN_PORT_KEY));
+        String adminPort = znRecord.getSimpleField(CommonConstants.Helix.Instance.ADMIN_PORT_KEY);
+        InstanceConfig instanceConfig = new InstanceConfig(znRecord);
+        String[] hostnameSplit = instanceConfig.getHostName().split("_");
+        String adminEndpoint =  hostnameSplit[1] + ":" + adminPort;
+        Assert.assertTrue(endpoints.inverse().containsKey(adminEndpoint));
+      }
+    }
+  }
+
+  @Test
+  public void testGetInstanceConfigsFromZkCacheBaseDataAccessor() {
+    Set<String> servers = _helixResourceManager.getAllInstancesForServerTenant(SERVER_TENANT_NAME);
+    ZkCacheBaseDataAccessor<ZNRecord> zkCacheBaseDataAccessor = _helixResourceManager.getCacheInstanceConfigsDataAccessor();
+    for (String server : servers) {
+      ZNRecord cachedZnRecord = zkCacheBaseDataAccessor.get("/" + server, null, AccessOption.PERSISTENT);
+      InstanceConfig cachedInstanceConfig = new InstanceConfig(cachedZnRecord);
+      InstanceConfig realInstanceConfig = _helixAdmin.getInstanceConfig(_helixClusterName, server);
+      Assert.assertEquals(cachedInstanceConfig, realInstanceConfig);
     }
   }
 
@@ -163,6 +195,12 @@ public class PinotHelixResourceManagerTest extends ControllerTest {
       Assert.assertEquals(retrievedMetadata.getSegmentName(), segmentName);
       Assert.assertEquals(realtimeMetadata.getStatus(), CommonConstants.Segment.Realtime.Status.DONE);
     }
+  }
+
+  @Test
+  public void testGetDataInstanceAdminEndpoints() {
+    Set<String> fakeInstances = new HashSet<>();
+    new Random().nextInt(NUM_INSTANCES);
   }
 
 
